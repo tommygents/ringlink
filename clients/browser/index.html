@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ringlink — browser client</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 16px/1.4 system-ui, sans-serif; background: #14171c; color: #e6e6e6;
+         margin: 0; display: grid; place-items: center; min-height: 100vh; }
+  .wrap { width: 360px; text-align: center; }
+  svg { display: block; margin: 0 auto; }
+  .gait { font-size: 22px; letter-spacing: .08em; text-transform: uppercase; margin: .4em 0; }
+  .reps { color: #9aa7b4; }
+  #banner { min-height: 1.4em; margin: .6em 0; font-weight: 600; }
+  #banner.lost { color: #ff6b6b; } #banner.live { color: #51cf66; } #banner.err { color: #ffa94d; }
+  #overlay { min-height: 1.4em; color: #74c0fc; }
+  button { margin-top: .8em; padding: .5em 1.1em; border: 0; border-radius: 8px;
+           background: #364fc7; color: #fff; font-size: 15px; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <svg width="240" height="240" viewBox="0 0 240 240">
+      <circle id="ring" cx="120" cy="120" r="80" fill="none" stroke="#5c7cfa" stroke-width="16" />
+      <circle id="lean" cx="120" cy="120" r="9" fill="#ffd43b" />
+    </svg>
+    <div class="gait"><span id="gait">rest</span></div>
+    <div class="reps">squat reps: <span id="reps">0</span></div>
+    <div id="banner"></div>
+    <div id="overlay"></div>
+    <button id="cal">Calibrate (R)</button>
+  </div>
+
+  <script type="module">
+    import { RingLinkClient } from "./ringlink-client.js";
+    const $ = (id) => document.getElementById(id);
+
+    const client = new RingLinkClient("ws://127.0.0.1:28412", {
+      onState(s) {
+        // Ring-first face: squeeze grows + reddens the ring, pull shrinks + blues it.
+        $("ring").setAttribute("r", 80 + s.flex * 36);
+        $("ring").setAttribute("stroke", s.flex > 0 ? "#ff8787" : "#74c0fc");
+        $("lean").setAttribute("cx", 120 + s.lean.roll * 60);
+        $("lean").setAttribute("cy", 120 + s.lean.pitch * 60);
+        $("gait").textContent = s.squatting ? "squat" : s.gait;
+        $("reps").textContent = s.squat_reps;
+      },
+      onStatus(pads) {
+        const lost = pads.R !== "live";
+        $("banner").className = lost ? "lost" : "live";
+        $("banner").textContent = lost ? "Right pad asleep — press a button to wake" : "Pad live";
+      },
+      onCalibrating(m) {
+        $("overlay").textContent = m.step === "done"
+          ? "" : `Calibrating ${m.pad}: ${m.step} ${m.pct}%`;
+      },
+      onError(e) { $("banner").className = "err"; $("banner").textContent = e.message; },
+      onConnection(s) { if (s === "closed") $("banner").textContent = "Reconnecting…"; },
+    });
+    $("cal").onclick = () => client.calibrate("R");
+    client.connect();
+  </script>
+</body>
+</html>

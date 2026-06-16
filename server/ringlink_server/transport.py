@@ -30,10 +30,16 @@ DEFAULT_RATE_HZ = 66
 
 # Origin allowlist (design [N4]). A loopback WS is reachable by any local process,
 # including a browser tab on a hostile page. Native clients (the pygame client,
-# this harness) send no Origin header -> `None` must be allowed. The browser
-# client's origins are added in Phase 2 when it lands. websockets rejects any
-# Origin not in this list with HTTP 403 before the handshake completes.
-ALLOWED_ORIGINS: list[str | None] = [None]
+# the contract-check harness) send no Origin header -> `None` must be allowed. The
+# bundled browser client, served over http for local dev, sends a localhost Origin
+# -> the conventional `python -m http.server` ports are allowed here. websockets
+# rejects any Origin not in this list with HTTP 403 before the handshake completes.
+# (Phase 5 generalizes this to an any-localhost-port predicate; exact strings now.)
+ALLOWED_ORIGINS: list[str | None] = [
+    None,
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+]
 
 
 def set_nodelay(connection) -> bool:
@@ -95,29 +101,52 @@ def make_stub_frame(seq: int, t: float) -> dict:
     }
 
 
+def make_calibrating(pad: str, pose: str, step: str, pct: int) -> dict:
+    """A `calibrating` progress message (design §Calibration / §Message types)."""
+    return {"type": "calibrating", "pad": pad, "pose": pose, "step": step, "pct": pct}
+
+
+def make_status(r: str = "live", l: str = "lost") -> dict:
+    """A `status` liveness message (design [M5])."""
+    return {"type": "status", "pads": {"R": r, "L": l}}
+
+
+# Scripted calibration the stub plays back on a `calibrate` request. The real L3
+# (Phase 4) replaces this with the directed-gesture axis-resolution flow; for the
+# spike it exercises the client's `calibrating`-overlay handling. The terminal
+# step "done" lets the client clear the overlay without a timer.
+_STUB_CALIBRATION_STEPS = ("hold-still", "lean-forward", "lean-right")
+
+
 async def serve_stub(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
     rate_hz: int = DEFAULT_RATE_HZ,
     stop: asyncio.Event | None = None,
+    simulate_status: bool = False,
 ):
     """Run the stub L4 server: `hello`, then `frame`s at ~`rate_hz` per client.
 
-    This is the production-shaped streaming path (open-loop fire-hose), distinct
-    from the closed-loop ping in `latency.py`. Binds loopback only; sets
-    `TCP_NODELAY`; enforces the Origin allowlist. Runs until `stop` is set (or
-    forever if `stop is None`).
+    Production-shaped streaming path (open-loop fire-hose), distinct from the
+    closed-loop ping in `latency.py`. Binds loopback only; sets `TCP_NODELAY`;
+    enforces the Origin allowlist. Also handles the `calibrate` control message by
+    playing back a scripted `calibrating` sequence (Phase 2 spike), and — when
+    `simulate_status` — emits a scripted `pad_lost` -> `live` `status` transition
+    so a client's wake/reconnect affordance can be exercised hardware-free.
+
+    Runs until `stop` is set (or forever if `stop is None`).
     """
     session_id = secrets.token_hex(3)
 
     async def handler(conn: ServerConnection) -> None:
         set_nodelay(conn)
-        period = 1.0 / rate_hz
-        start = time.perf_counter()
-        next_tick = start
-        seq = 0
-        try:
-            await conn.send(json.dumps(make_hello(session_id, rate_hz)))
+        await conn.send(json.dumps(make_hello(session_id, rate_hz)))
+
+        async def frame_sender() -> None:
+            period = 1.0 / rate_hz
+            start = time.perf_counter()
+            next_tick = start
+            seq = 0
             while True:
                 now = time.perf_counter()
                 await conn.send(json.dumps(make_stub_frame(seq, now - start)))
@@ -126,8 +155,38 @@ async def serve_stub(
                 delay = next_tick - time.perf_counter()
                 if delay > 0:
                     await asyncio.sleep(delay)
+
+        async def control_receiver() -> None:
+            # Frames keep flowing concurrently during calibration (mirrors real L4).
+            async for msg in conn:
+                try:
+                    data = json.loads(msg)
+                except (ValueError, TypeError):
+                    continue
+                if data.get("type") == "calibrate":
+                    pad = data.get("pad", "R")
+                    for step in _STUB_CALIBRATION_STEPS:
+                        for pct in (0, 50, 100):
+                            await conn.send(json.dumps(make_calibrating(pad, "rest", step, pct)))
+                            await asyncio.sleep(0.04)
+                    await conn.send(json.dumps(make_calibrating(pad, "rest", "done", 100)))
+
+        async def status_sim() -> None:
+            await asyncio.sleep(1.0)
+            await conn.send(json.dumps(make_status(r="lost", l="lost")))
+            await asyncio.sleep(0.6)
+            await conn.send(json.dumps(make_status(r="live", l="lost")))
+
+        tasks = [asyncio.create_task(frame_sender()), asyncio.create_task(control_receiver())]
+        if simulate_status:
+            tasks.append(asyncio.create_task(status_sim()))
+        try:
+            await asyncio.gather(*tasks)
         except ConnectionClosed:
-            return
+            pass
+        finally:
+            for t in tasks:
+                t.cancel()
 
     async with serve(handler, host, port, origins=ALLOWED_ORIGINS):
         if stop is None:
@@ -149,6 +208,8 @@ __all__ = [
     "set_nodelay",
     "make_hello",
     "make_stub_frame",
+    "make_calibrating",
+    "make_status",
     "serve_stub",
     "server_port",
 ]
