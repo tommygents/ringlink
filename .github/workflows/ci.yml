@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # doom_ring's port (Phase 6) needs the vendored submodule; pull it now
+          # so a fresh CI checkout matches a `--recurse-submodules` clone.
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package + dev deps
+        # Editable install puts the src-layout `ringlink_server` package on the
+        # path. hidapi installs from a prebuilt wheel (no native build); the test
+        # suite never imports it, so a missing libudev on the runner can't break
+        # the hardware-free tests.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Server entry point runs
+        run: python -m ringlink_server --version
+
+      - name: Run tests
+        run: pytest -q

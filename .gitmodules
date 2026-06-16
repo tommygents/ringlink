@@ -1,0 +1,3 @@
+[submodule "examples/doom_ring/doom"]
+	path = examples/doom_ring/doom
+	url = https://github.com/stanislavPetrovV/DOOM-style-game.git

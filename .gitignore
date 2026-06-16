@@ -1,0 +1,20 @@
+# Python virtual environment — recreate per-machine, never commit
+.venv/
+venv/
+env/
+
+# Python build / install / bytecode / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# OS / editor junk
+Thumbs.db
+desktop.ini
+.DS_Store
+*.tmp
+.vscode/
+.idea/

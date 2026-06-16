@@ -1,0 +1,3 @@
+# Canonical raw hardware traces are recorded in Phase 3 (right-pad strain+IMU,
+# left-pad leg IMU, including the directed-gesture calibration motions). Once
+# committed here, the whole downstream pipeline tests hardware-free.
