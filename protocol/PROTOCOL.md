@@ -1,12 +1,22 @@
 # The ringlink protocol
 
 > **Wire version: `1.0`** (advertised in `hello.protocol`) ·
-> **Document revision: 0.1** (Phase 0 — lifted from the design spec).
+> **Document revision: 0.2** (Phase 4 — cooked vocabulary finalized against the
+> Phase-3 traces; axis resolution refined to exclude the gravity axis).
 >
 > This is the **normative** contract. The reference server and every client
 > validate against it. It is bumped whenever the vocabulary or wire shape changes
-> (next at Phases 4 and 6 per the implementation plan). Where this doc and code
-> disagree, this doc wins — fix the code.
+> (next at Phase 6 per the implementation plan). Where this doc and code disagree,
+> this doc wins — fix the code.
+>
+> **What changed in 0.2.** The high-rate plane (`hello`, `frame`/`state`, `status`,
+> `error`, events) is **unchanged** — a 0.1 consumer of the live stream is
+> unaffected. The **calibration control plane did change**: `pose` is **removed**
+> from both `calibrate` and `calibrating`, and calibration is now a single
+> server-driven sequence rather than per-pose requests (see Calibration). A 0.1
+> client that sent or rendered `pose` must update. The protocol is pre-1.0-release
+> (no external clients yet), so the `1.0` wire tag is not re-cut for this. 0.2 also
+> pins the L3 semantics Phase 4 settled (gravity-excluded axis resolution).
 
 `ringlink` is a loopback **WebSocket-JSON** protocol. One server owns the single
 HID handle to the Ring Fit Joy-Cons, cooks raw strain/IMU into a normalized
@@ -104,6 +114,12 @@ this order:
    live locomotion reading during a squat). `squat` is **not** a `gait` value.
 3. `squat_reps` ← `LegTracker.squat_reps`.
 
+The `run`/`sprint` gyro-energy thresholds are **server tuning, not wire contract** —
+they are instance-configurable (defaults widened to 1500/4500 raw mean‑|gyro| after a
+real worn jog read hotter than the first build's 700/2200). Making them
+calibration-derived (from a calibration jog) is a tracked follow-up; clients see only
+the resulting `gait` enum either way.
+
 ### Nullable raw-field contract
 
 At the raw layer, `strain` / `accel` / `gyro` can be `None` when a report is too
@@ -137,7 +153,7 @@ Each event: `{ "type", "t", …payload }`.
              "buttons": ["A"], "stick": [0.0, 0.0] },
   "events": [ { "type": "squeeze", "strength": 0.8, "t": 1623.44 } ] }
 
-{ "type": "calibrating", "pad": "R", "pose": "rest", "step": "lean-forward", "pct": 60 }
+{ "type": "calibrating", "pad": "R", "step": "lean-forward", "pct": 60 }
 
 { "type": "status", "pads": { "R": "live", "L": "lost" } }
 
@@ -147,12 +163,27 @@ Each event: `{ "type", "t", …payload }`.
 - `status` is emitted when a pad's liveness changes. `lost` = the pad
   slept/disconnected; the server stops advancing that pad's state until the next
   good read, when it emits `live`. Clients should show a wake/reconnect affordance.
+- `calibrating` is emitted as the server walks the pad's step sequence: `step` ∈
+  {`rest`, `lean-forward`, `lean-right`} for `pad: "R"`, and is `rest` only for
+  `pad: "L"`; `pct` is 0–100 progress through the current step's capture window.
+  Clients render the prompt from `step` and a progress bar from `pct`. **Completion is
+  signaled by `step: null`** — the server has stopped prompting and the pad is
+  calibrated. A directed step whose capture saw **no real lean** is *re-prompted*: the
+  same `step` is emitted again from `pct: 0` (the server does not commit a guessed
+  axis), so a client may legitimately see a step repeat. The server only counts a
+  capture window **after** showing the prompt and allowing a reaction beat, so the
+  user's gesture — not the prompt-display latency — fills the window.
 
 ### Client → server (control plane)
 
 ```json
-{ "type": "calibrate", "pad": "R", "pose": "rest", "seconds": 3 }
+{ "type": "calibrate", "pad": "R", "seconds": 3 }
 ```
+
+A `calibrate` kicks off the **whole sequence** for that pad (the server walks
+`rest → lean-forward → lean-right` for `R`, `rest` for `L`) — the client does not send
+per-pose requests; it just renders the `calibrating` stream. `seconds` is an optional
+hint for the per-step capture window (mapped onto the server's frames-per-step).
 
 `subscribe` / stream-thinning is **not** in v1 (66 Hz of small JSON is cheap).
 
@@ -178,15 +209,26 @@ The right pad's IMU axes can't be inferred from a still rest sample — that
 uncertainty is why the first build shipped runtime axis-guessing keys. v1 replaces
 guessing with a directed-gesture calibration step:
 
-1. **Hold still** → capture rest accel (the gravity vector).
-2. Server prompts `calibrating.step: "lean-forward"` → user leans forward and
-   returns. The server records which accel axis changed most and its sign → that
-   becomes **`pitch`** (axis index + sign).
-3. Server prompts `calibrating.step: "lean-right"` → same, resolving **`roll`**.
+1. **Hold still** (`step: "rest"`) → snap the rest accel (the gravity vector) **and**
+   the flex rest. This step runs **first**, because resolution below depends on the
+   gravity axis it captures.
+2. Server prompts `step: "lean-forward"` → user leans forward and returns. The server
+   records which accel axis deflects most from rest **— excluding the gravity axis —**
+   and its sign → that becomes **`pitch`** (axis index + sign).
+3. Server prompts `step: "lean-right"` → same, resolving **`roll`**.
+
+**Exclude the gravity axis.** The naive "axis that changed most" is fragile: a still
+pad rests at ~1 g on one axis, and *any* lean rotates gravity off it, so that axis
+deflects under both leans — it would win spuriously and **collide pitch with roll**
+(the Phase-3 trace separated them by only ~1.2× on the bare rule). Resolving against
+the *secondary* axis (≈0 at rest, grows with one specific lean) gives robust, distinct
+axes (12×/3× margins on the same trace). A future implementer must **not** rebuild the
+bare maximum-deflection rule.
 
 The resolved (axis-index, sign) pairs are what `lean.pitch` / `lean.roll` are
 computed against thereafter. The leg pad needs only the still rest-gravity capture
-(no directed step — `LegTracker` is orientation-agnostic via tilt-from-rest).
+(`step: "rest"` alone — no directed step, since `LegTracker` is orientation-agnostic
+via tilt-from-rest).
 
 ## Deferred (protocol-compatible fast-follows)
 

@@ -100,6 +100,43 @@ def test_axis_resolution_is_deterministic():
     assert resolve_axis(rest, samples, exclude=grav) == resolve_axis(rest, samples, exclude=grav)
 
 
+def test_exclusion_separates_axes_a_bare_rule_collides():
+    # The headline Phase-4 refinement: excluding the gravity axis must CHANGE the result,
+    # not just agree with the bare rule on the canonical trace (where Z/X already beat Y).
+    # Synthesize a grip where gravity (Y) deflects MOST under both leans, so the bare
+    # "axis that changed most" rule resolves BOTH to Y -> pitch collides with roll -> lean
+    # is ambiguous. Excluding Y resolves to the distinct secondary axes (Z, then X).
+    rest = (0.0, 4000.0, 0.0)  # gravity on Y (axis 1)
+    assert gravity_axis(rest) == 1
+    # forward lean: gravity rotates off Y hard (-3200) while Z grows (+2500).
+    fwd = [(0.0, 800.0, 2500.0)]
+    # right lean: gravity off Y hard (-3200) while X grows (+2500).
+    right = [(2500.0, 800.0, 0.0)]
+
+    # Bare maximum-deflection rule (no exclusion) picks the gravity axis for BOTH.
+    bare_pitch = resolve_axis(rest, fwd)[0]
+    bare_roll = resolve_axis(rest, right)[0]
+    assert bare_pitch == 1 and bare_roll == 1
+    assert bare_pitch == bare_roll  # collision: lean would be ambiguous
+
+    # Excluding the gravity axis resolves to DISTINCT secondary axes.
+    ex_pitch = resolve_axis(rest, fwd, exclude=1)[0]
+    ex_roll = resolve_axis(rest, right, exclude=1)[0]
+    assert ex_pitch == 2 and ex_roll == 0
+    assert ex_pitch != ex_roll  # the guarantee the exclusion buys
+
+
+def test_resolve_axis_weak_gesture_raises():
+    import pytest
+
+    from ringlink_server.cook import WeakGestureError
+
+    rest = (0.0, 4000.0, 0.0)
+    still = [(0.0, 4005.0, 3.0), (1.0, 3998.0, -2.0)]  # jitter only, no real lean
+    with pytest.raises(WeakGestureError):
+        resolve_axis(rest, still, exclude=1, min_deflection=1024.0)
+
+
 # --------------------------------------------------------------------------- #
 # lean (against resolved axes)
 # --------------------------------------------------------------------------- #

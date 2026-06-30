@@ -83,7 +83,15 @@ def gravity_axis(rest_accel: tuple) -> int:
     return max(range(3), key=lambda i: abs(rest_accel[i]))
 
 
-def resolve_axis(rest_accel: tuple, samples: list, exclude: int | None = None) -> tuple[int, int]:
+class WeakGestureError(Exception):
+    """A directed-gesture capture didn't deflect enough to resolve an axis — the user
+    likely hadn't started moving yet (capture armed before the lean) or the window was
+    empty. The calibration state machine catches this and re-prompts the step rather
+    than committing a near-arbitrary axis (see `Calibrator`)."""
+
+
+def resolve_axis(rest_accel: tuple, samples: list, exclude: int | None = None,
+                 min_deflection: float = 0.0) -> tuple[int, int]:
     """Directed-gesture axis resolution [G2].
 
     Given the rest accel (gravity vector) and accel samples from ONE directed lean
@@ -96,6 +104,11 @@ def resolve_axis(rest_accel: tuple, samples: list, exclude: int | None = None) -
     ~1 g on one axis, every lean rotates gravity off it, so it deflects in *both*
     directions and would otherwise win spuriously and collide pitch with roll. The
     robust discriminator is the secondary axis (~0 at rest, grows with one lean).
+
+    `min_deflection` is a floor on the winning peak's magnitude: below it the capture
+    saw no real lean (a still or empty window) and `max()` would still hand back a
+    near-arbitrary axis — so we raise `WeakGestureError` instead of resolving garbage.
+    Default 0.0 keeps the pure primitive permissive; the state machine supplies a floor.
     """
     peak = [0.0, 0.0, 0.0]  # signed delta of largest |.| seen per axis
     for a in samples:
@@ -109,6 +122,10 @@ def resolve_axis(rest_accel: tuple, samples: list, exclude: int | None = None) -
                 peak[i] = d
     candidates = [i for i in range(3) if i != exclude]
     idx = max(candidates, key=lambda i: abs(peak[i]))
+    if abs(peak[idx]) < min_deflection:
+        raise WeakGestureError(
+            f"peak deflection {abs(peak[idx]):.0f} < floor {min_deflection:.0f}"
+        )
     sign = 1 if peak[idx] >= 0 else -1
     return idx, sign
 
@@ -117,6 +134,12 @@ def resolve_axis(rest_accel: tuple, samples: list, exclude: int | None = None) -
 # ~2048 ≈ half a g ≈ a firm ~30° tilt — tunable; saturating before 90° keeps lean
 # responsive without demanding extreme motion. Verified against the Phase-3 trace.
 LEAN_FULL_SCALE = 2048.0
+
+# Floor (raw accel delta) a directed lean must clear to resolve an axis. ~1024 ≈ ¼ g ≈
+# a clear ~15° tilt — comfortably under a real directed lean (Phase-3 peaks were
+# 6000–8000) and well over still-pose jitter, so a capture that saw no real motion
+# raises `WeakGestureError` rather than committing a near-arbitrary axis.
+MIN_LEAN_DEFLECTION = 1024.0
 
 
 class LeanCal:
@@ -135,15 +158,19 @@ class LeanCal:
         if a:
             self.rest_accel = tuple(_mean([s[i] for s in a]) for i in range(3))
 
-    def resolve_pitch(self, samples: list) -> None:
+    def resolve_pitch(self, samples: list, min_deflection: float = 0.0) -> None:
         # Exclude the gravity axis: it deflects under any lean and would resolve
-        # spuriously (and could collide pitch with roll). See resolve_axis.
+        # spuriously (and could collide pitch with roll). See resolve_axis. A
+        # min_deflection floor (supplied by the state machine) raises WeakGestureError
+        # on a no-motion capture rather than committing a near-arbitrary axis.
         self.pitch = resolve_axis(self.rest_accel, samples,
-                                  exclude=gravity_axis(self.rest_accel))
+                                  exclude=gravity_axis(self.rest_accel),
+                                  min_deflection=min_deflection)
 
-    def resolve_roll(self, samples: list) -> None:
+    def resolve_roll(self, samples: list, min_deflection: float = 0.0) -> None:
         self.roll = resolve_axis(self.rest_accel, samples,
-                                 exclude=gravity_axis(self.rest_accel))
+                                 exclude=gravity_axis(self.rest_accel),
+                                 min_deflection=min_deflection)
 
     def cook(self, accel) -> dict | None:
         if accel is None:
@@ -191,17 +218,162 @@ class FlexEdges:
         return events
 
 
+# Frames captured per calibration step. ~90 @66Hz ≈ 1.4s — long enough for a steady
+# gravity read / a full directed lean, short enough not to tire the user. Tunable; L4
+# may map a `seconds` request onto it. Trace-replay tests feed exactly this many.
+FRAMES_PER_STEP = 90
+
+
+class Calibrator:
+    """The directed-gesture calibration **state machine** — snap→resolve over LIVE
+    frames (design [G2], C5; PROTOCOL.md "Axis resolution").
+
+    The pure cookers (`FlexCal`, `LeanCal`, `LegCooker`) already know how to snap a rest
+    or resolve an axis from a *batch* of samples. This drives that batch capture from a
+    live frame stream: per step it collects `frames_per_step` frames, finalizes (snapping
+    / resolving the wired cookers), and advances — exposing `step`/`pct`/`done` so L4 can
+    broadcast `calibrating` messages and prompt the user. It owns no transport; L4 (Phase
+    5) feeds it frames and fans its progress out.
+
+    **Arming gate (do not pump blindly).** A capture only counts frames while *armed*.
+    The machine starts disarmed and disarms after every step, so the intended L4 loop is:
+    show the `step` prompt → give the user a beat to react → `arm()` → feed frames until
+    the step advances. Without this, the next directed window would open the instant the
+    prior one filled — before the user has moved — and capture pre-gesture frames. While
+    disarmed, `feed()` is ignored, so reaction-gap frames never contaminate a capture.
+
+    **Weak-gesture guard.** A directed step that saw no real lean (armed too early, or the
+    user didn't move) does not silently commit a near-arbitrary axis: `resolve_axis`
+    raises `WeakGestureError`, which the machine catches, sets `weak=True`, disarms, and
+    **stays on the same step** so L4 re-prompts. `arm()` clears `weak`.
+
+    Pads calibrate **independently** (PROTOCOL.md): R runs rest→lean-forward→lean-right
+    (rest snaps flex rest + lean gravity; the two leans resolve pitch/roll against the
+    gravity-excluded axes); L runs rest only (snap the worn gravity vector — `LegTracker`
+    is orientation-agnostic, no directed step). Nullable contract: a frame whose `accel`
+    is missing does **not** count toward a step (a too-short report can't calibrate).
+
+    The `rest` step uses *mean* snaps (gravity + flex), so it is the contamination-
+    sensitive one — prompt "hold still" and only `arm()` once the user is settled.
+
+    Multi-client *serialization/broadcast* of calibration is L4 fan-out, scoped to Phase
+    5 — this is just the single-pad engine it will drive.
+    """
+
+    R_STEPS = ("rest", "lean-forward", "lean-right")
+    L_STEPS = ("rest",)
+
+    def __init__(self, pad: str, *, flex=None, lean=None, leg=None,
+                 frames_per_step: int = FRAMES_PER_STEP,
+                 min_deflection: float = MIN_LEAN_DEFLECTION):
+        if pad not in ("R", "L"):
+            raise ValueError(f"pad must be 'R' or 'L', got {pad!r}")
+        if frames_per_step < 1:
+            raise ValueError(f"frames_per_step must be >= 1, got {frames_per_step}")
+        self.pad = pad
+        self.frames_per_step = frames_per_step
+        self.min_deflection = min_deflection
+        self._flex = flex
+        self._lean = lean
+        self._leg = leg
+        self._steps = self.R_STEPS if pad == "R" else self.L_STEPS
+        self._i = 0
+        self._buf: list = []  # accel samples collected for the current step
+        self._armed = False   # feed() counts only while armed (see class docstring)
+        self.done = False
+        self.weak = False         # last directed capture was too weak; re-prompt
+        self.flex_snapped = False  # rest captured a usable flex rest (else stayed default)
+
+    @property
+    def step(self) -> str | None:
+        """The current step's name (what to prompt the user), or `None` when done."""
+        return None if self.done else self._steps[self._i]
+
+    @property
+    def armed(self) -> bool:
+        return self._armed
+
+    @property
+    def pct(self) -> int:
+        """0–100 progress through the current step's capture window (0 while disarmed)."""
+        if self.done:
+            return 100
+        return min(100, round(100 * len(self._buf) / self.frames_per_step))
+
+    def arm(self) -> None:
+        """L4 calls this once it has shown the current step's prompt and given the user a
+        beat to react. Only then does `feed()` accumulate. Starts a fresh window and
+        clears any prior weak-gesture flag (this is a fresh attempt at the step)."""
+        if self.done:
+            return
+        self._armed = True
+        self.weak = False
+        self._buf = []
+
+    def feed(self, frame: dict) -> None:
+        """Feed one raw frame. Counts toward the window only while armed; auto-finalizes
+        and advances when the window fills. No-op once `done` or while disarmed."""
+        if self.done or not self._armed:
+            return
+        if frame.get("accel") is None:
+            return  # nullable: a too-short report can't contribute to calibration
+        self._buf.append(frame)
+        if len(self._buf) >= self.frames_per_step:
+            self._finalize()
+
+    def _finalize(self) -> None:
+        step = self._steps[self._i]
+        accels = [f["accel"] for f in self._buf]
+        try:
+            if step == "rest":
+                if self.pad == "R":
+                    # Rest snaps BOTH flex rest and lean gravity — and must run before
+                    # the leans, since resolution excludes the gravity axis snapped here.
+                    if self._flex is not None:
+                        before = self._flex.rest
+                        self._flex.snap([f.get("strain") for f in self._buf])
+                        self.flex_snapped = self._flex.rest != before or any(
+                            f.get("strain") is not None for f in self._buf
+                        )
+                    if self._lean is not None:
+                        self._lean.snap_rest(accels)
+                elif self._leg is not None:
+                    self._leg.snap_rest(accels)
+            elif step == "lean-forward":
+                if self._lean is not None:
+                    self._lean.resolve_pitch(accels, min_deflection=self.min_deflection)
+            elif step == "lean-right":
+                if self._lean is not None:
+                    self._lean.resolve_roll(accels, min_deflection=self.min_deflection)
+        except WeakGestureError:
+            # The capture saw no real lean — don't commit a garbage axis. Stay on this
+            # step, disarmed, flagged weak; L4 re-prompts and re-arms.
+            self.weak = True
+            self._armed = False
+            self._buf = []
+            return
+        self._buf = []
+        self._armed = False  # next step requires a fresh arm() after its prompt
+        self._i += 1
+        if self._i >= len(self._steps):
+            self.done = True
+
+
 __all__ = [
     "PULL_FLOOR",
     "PUSH_CEIL",
     "REST_DEFAULT",
     "LEAN_FULL_SCALE",
+    "MIN_LEAN_DEFLECTION",
+    "FRAMES_PER_STEP",
     "clamp",
     "FlexCal",
     "squeeze_of",
     "pull_of",
     "gravity_axis",
     "resolve_axis",
+    "WeakGestureError",
     "LeanCal",
     "FlexEdges",
+    "Calibrator",
 ]
