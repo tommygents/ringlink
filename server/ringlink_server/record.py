@@ -28,10 +28,16 @@ gesture, so no Enter-presses between segments. Just watch the prompt and move.
 from __future__ import annotations
 
 import json
+import queue
 import time
 from pathlib import Path
 
 from .lifecycle import AlreadyRunning, RingHub, acquire_singleton
+
+# A segment that captures fewer than this many frames almost certainly means the pad
+# dropped mid-capture (or never streamed). At ~66 Hz even a 3 s segment yields ~190
+# frames, so this is a clear "something went wrong" floor — not a tuning knob.
+MIN_SEGMENT_FRAMES = 30
 
 # Guided segment scripts. (label, prompt, seconds | None). seconds=None -> use the
 # open-ended default (for "do as many as you can" segments like squats).
@@ -61,7 +67,7 @@ def _drain(hub: RingHub) -> None:
     while True:
         try:
             hub.frames.get_nowait()
-        except Exception:
+        except queue.Empty:
             return
 
 
@@ -81,7 +87,7 @@ def _record_segment(hub: RingHub, side: str, label: str, seconds: float, out) ->
     while time.monotonic() < deadline:
         try:
             s, frame, t = hub.frames.get(timeout=0.2)
-        except Exception:
+        except queue.Empty:
             continue
         if s != side:
             continue
@@ -155,12 +161,23 @@ def record_trace(
             }) + "\n")
 
             total = 0
+            thin: list[tuple[str, int]] = []
             for label, prompt, seconds in segs:
                 secs = seconds if seconds is not None else open_seconds
                 _countdown(label, prompt, secs)
                 _drain(hub)  # start the window clean, after the countdown
-                total += _record_segment(hub, side, label, secs, out)
+                n = _record_segment(hub, side, label, secs, out)
+                total += n
+                if n < MIN_SEGMENT_FRAMES:
+                    thin.append((label, n))
+                    print(f"  !! WARNING [{label}] captured only {n} frames "
+                          f"(expected hundreds) — the pad likely dropped. "
+                          f"Re-run this capture before trusting it.")
 
+        if thin:
+            names = ", ".join(f"{lbl}({n})" for lbl, n in thin)
+            print(f"\n!! THIN SEGMENTS — recapture recommended before using this "
+                  f"trace: {names}")
         print(f"\nDone. {total} frames across {len(segs)} segments -> {path}")
         return path
     finally:

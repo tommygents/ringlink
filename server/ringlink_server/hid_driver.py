@@ -18,6 +18,7 @@ See ``protocol/PROTOCOL.md`` §"Nullable raw-field contract" and the project got
 from __future__ import annotations
 
 import struct
+import threading
 import time
 
 import hid
@@ -84,6 +85,10 @@ class JoyCon:
         self.dev = hid.device()
         self.dev.open_path(path)
         self._count = 0
+        # Optional threading.Event; when set, `_send_and_wait` (and therefore a full
+        # init) bails promptly so a reader thread can abort a long re-init at
+        # shutdown instead of blocking past the join bound (see lifecycle.RingHub.stop).
+        self.abort: threading.Event | None = None
 
     def close(self):
         self.dev.close()
@@ -106,6 +111,10 @@ class JoyCon:
         try:
             data = self.dev.read(362, timeout_ms)
         except OSError:
+            # A live read blocks for ~timeout_ms, but OSError (a BT stutter, or a
+            # dropped/re-enumerated node) returns *instantly*. Back off here so a dead
+            # handle can't busy-spin a core; a transient stutter just costs ~50 ms.
+            time.sleep(0.05)
             return b""
         return bytes(data) if data else b""
 
@@ -128,9 +137,13 @@ class JoyCon:
         appears. A flaky BT link needing 1–2 resends is normal.
         """
         for attempt in range(retries):
+            if self.abort is not None and self.abort.is_set():
+                return None  # shutdown requested mid-init — bail promptly
             self.send_subcommand(sub_id, data)
             deadline = time.time() + timeout
             while time.time() < deadline:
+                if self.abort is not None and self.abort.is_set():
+                    return None
                 buf = self.read(timeout_ms=200)
                 if not buf:
                     continue

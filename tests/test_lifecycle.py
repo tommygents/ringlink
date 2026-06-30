@@ -52,6 +52,30 @@ class FakeJoyCon:
         self.closed = True
 
 
+class SlowInitJoyCon(FakeJoyCon):
+    """A pad whose re-init blocks for a long time but honors `abort` — models the
+    multi-second MCU bring-up that a sleep-recovery triggers. PadReader sets
+    `.abort` to its stop Event; init must return as soon as that fires.
+    """
+
+    def __init__(self, sleep_until: float = 0.0):
+        super().__init__(sleep_until=sleep_until)
+        self.abort = None  # set by PadReader to its _stop Event
+
+    def _blocking_init(self) -> bool:
+        self.inits += 1
+        # Simulate a long init that bails the moment shutdown is requested.
+        while not (self.abort is not None and self.abort.is_set()):
+            time.sleep(0.01)
+        return False
+
+    def init_ringcon(self) -> bool:
+        return self._blocking_init()
+
+    def init_imu_only(self) -> bool:
+        return self._blocking_init()
+
+
 # --------------------------------------------------------------------------- #
 # Singleton
 # --------------------------------------------------------------------------- #
@@ -123,3 +147,32 @@ def test_reader_self_heals_after_sleep_gap():
     time.sleep(0.5)
     reader.stop()
     assert reader.reinits >= 1
+
+
+def test_reinit_aborts_promptly_on_stop():
+    # A reinit blocks for a long time; stop() must abort it within the join bound so
+    # the thread actually exits (the fix for the close-during-live-read exit-139).
+    fake = SlowInitJoyCon(sleep_until=time.monotonic() + 0.1)
+    reader = PadReader("R", fake, queue.Queue(maxsize=8), t0=time.monotonic(),
+                       stale_timeout_s=0.05)
+    reader.start()
+    time.sleep(0.35)            # let it pass the gap and enter the blocking init
+    assert fake.inits >= 1      # we are mid-reinit
+    t0 = time.monotonic()
+    reader.stop()               # sets _stop == jc.abort -> init returns immediately
+    assert time.monotonic() - t0 < 1.0
+    assert not reader._thread.is_alive()
+
+
+def test_reinit_bool_and_honest_counter():
+    # A failed heal (dead/re-enumerated handle) returns False and is NOT counted;
+    # only a genuine heal increments `reinits`. This is what lets _run give up on a
+    # dead handle instead of trusting a lying counter.
+    fake = FakeJoyCon()
+    reader = PadReader("R", fake, queue.Queue(maxsize=8), t0=time.monotonic())
+    fake.init_ringcon = lambda: False  # type: ignore[method-assign]
+    assert reader._reinit() is False
+    assert reader.reinits == 0
+    fake.init_ringcon = lambda: True   # type: ignore[method-assign]
+    assert reader._reinit() is True
+    assert reader.reinits == 1

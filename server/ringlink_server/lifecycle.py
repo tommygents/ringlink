@@ -105,9 +105,19 @@ def acquire_singleton(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Sin
         raise AlreadyRunning(
             f"ringlink server already running on {host}:{port} ({exc})"
         ) from exc
+    # Phase 3: this socket is a pure lock — we listen() so a second bind fails, but
+    # never accept(). PHASE 5 NOTE: a client probing the port gets a successful TCP
+    # connect (the backlog accepts it) with no WS handshake, so a bare connect-probe
+    # can't distinguish "WS server up" from "lock held by stream/record". The L4 WS
+    # server must BE this accepting socket, or the client's probe must complete a
+    # real handshake before deciding not to spawn.
     sock.listen(1)
     path = endpoint_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    # On a hard kill, release() never runs and this file is left stale. It self-heals
+    # on the next start (the port frees, bind wins, the file is overwritten), and a
+    # client reading a stale endpoint just fails to connect -> spawns. `pid` is
+    # recorded for a future staleness check (unused in Phase 3).
     path.write_text(json.dumps({"host": host, "port": port, "pid": os.getpid()}))
     return Singleton(sock, host, port, path)
 
@@ -137,10 +147,19 @@ class PadReader:
         self._t0 = t0
         self.stale_timeout_s = stale_timeout_s
         self._stop = threading.Event()
+        # Let a long re-init abort promptly on shutdown — without this, stop()'s
+        # bounded join would abandon a thread still mid-init and RingHub.stop could
+        # close the handle out from under it (-> exit 139).
+        jc.abort = self._stop
         self._thread = threading.Thread(target=self._run, name=f"pad-{side}", daemon=True)
+        # last_read is written by the reader thread and read by the watchdog thread
+        # WITHOUT a lock: it relies on CPython's atomic attribute store/load, NOT on
+        # RingHub._lock (which only guards _status). Revisit for a free-threaded build.
         self.last_read = time.monotonic()
         self.dropped = 0
         self.reinits = 0
+        self._consec_reinit_fail = 0
+        self._heal_failed = False  # gave up healing a dead/re-enumerated handle
 
     def start(self) -> None:
         self.last_read = time.monotonic()
@@ -152,17 +171,20 @@ class PadReader:
         # so abandoning it on timeout is safe (process is tearing down anyway).
         self._thread.join(timeout=JOIN_TIMEOUT_S)
 
-    def _reinit(self) -> None:
+    def _reinit(self) -> bool:
         # init is idempotent; right pad needs the full MCU/Ring-Con bring-up (MCU
-        # state resets on sleep), left pad just standard input + IMU.
+        # state resets on sleep), left pad just standard input + IMU. Returns whether
+        # the handle actually came back: a fully-dropped (re-enumerated) node fails
+        # every subcommand -> False. Re-initing the SAME handle cannot recover a new
+        # device path (hub-level re-discovery is the real fix; tracked follow-up), so
+        # only a genuine heal counts.
         try:
-            if self.side == "R":
-                self.jc.init_ringcon()
-            else:
-                self.jc.init_imu_only()
-            self.reinits += 1
+            ok = self.jc.init_ringcon() if self.side == "R" else self.jc.init_imu_only()
         except OSError:
-            pass  # transient BT failure; next read retries the whole heal
+            return False
+        if ok:
+            self.reinits += 1
+        return bool(ok)
 
     def _emit(self, frame: dict, t: float) -> None:
         item = (self.side, frame, t)
@@ -188,15 +210,25 @@ class PadReader:
             now = time.monotonic()
             if not buf:
                 continue  # timeout / BT stutter / asleep — watchdog tracks staleness
-            if now - self.last_read > self.stale_timeout_s:
+            if now - self.last_read > self.stale_timeout_s and not self._heal_failed:
                 # Data after a long gap: the pad was asleep and may have reset.
-                # Re-init, then skip this (possibly stale/garbage) buffer.
-                self._reinit()
+                # Try to heal (re-init), then skip this (possibly stale) buffer.
+                if self._reinit():
+                    self._consec_reinit_fail = 0
+                else:
+                    self._consec_reinit_fail += 1
+                    if self._consec_reinit_fail >= 2:
+                        # The handle is dead (node fully dropped / re-enumerated).
+                        # Stop hammering it; stay 'lost' until real data or exit.
+                        self._heal_failed = True
                 self.last_read = time.monotonic()
                 continue
             frame = parse_report(buf)
             if frame is None:
                 continue
+            # Genuine data: the handle is healthy again.
+            self._heal_failed = False
+            self._consec_reinit_fail = 0
             self.last_read = now
             self._emit(frame, now - self._t0)
 
@@ -286,7 +318,15 @@ class RingHub:
                 self.on_status(snapshot)
 
     def stop(self) -> None:
-        """Idempotent: stop watchdog + readers (bounded joins), close HID handles."""
+        """Idempotent: stop watchdog + readers (bounded joins), close HID handles.
+
+        Each reader's `abort` Event (= its `_stop`) lets a long re-init bail
+        promptly, so threads normally finish within the join bound. If one is STILL
+        alive after the bound (stuck in a native HID call), we deliberately do NOT
+        close its handle: closing a handle a live thread is mid-read/write on is
+        undefined behavior and segfaults (exit 139). Leak it — the daemon thread is
+        abandoned and the OS reclaims the handle at process exit.
+        """
         if not self._started:
             return
         self._stop.set()
@@ -294,6 +334,8 @@ class RingHub:
         for reader in self._readers.values():
             reader.stop()
         for reader in self._readers.values():
+            if reader._thread.is_alive():
+                continue  # stuck in a native HID call; closing would race it -> 139
             try:
                 reader.jc.close()
             except OSError:

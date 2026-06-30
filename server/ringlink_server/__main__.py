@@ -1,8 +1,9 @@
 """Entry point for ``python -m ringlink_server`` / the ``ringlink-server`` script.
 
-Phase 0 wired ``--version``. Phase 1 adds the ``latency`` subcommand — the
-de-risk-transport GO/NO-GO harness. The real ``serve`` command (L1–L4) arrives in
-later phases per ``2026-06-15 ringlink — implementation plan``.
+Subcommands: ``--version``; ``latency`` (Phase 1 transport GO/NO-GO harness);
+``serve`` (Phase 1/2 stub L4 server); ``stream`` (Phase 3 raw L1+L2 readout from a
+live pad); ``record`` (Phase 3 guided canonical raw-trace capture). The full cooked
+L4 server lands in Phase 5 per ``2026-06-15 ringlink — implementation plan``.
 """
 
 from __future__ import annotations
