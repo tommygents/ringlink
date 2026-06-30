@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ringlink_server.cook import (
     FlexCal,
+    FlexEdges,
     LeanCal,
     gravity_axis,
     pull_of,
@@ -117,3 +118,45 @@ def test_lean_responds_on_resolved_axis_per_direction():
     assert max(abs(l["pitch"]) for l in rest_lean) < 0.3
     assert max(abs(l["pitch"]) for l in fwd_lean) > 0.5      # forward drives pitch
     assert max(abs(l["roll"]) for l in right_lean) > 0.5     # right drives roll
+
+
+# --------------------------------------------------------------------------- #
+# flex edges (squeeze / pull events)
+# --------------------------------------------------------------------------- #
+
+def test_flex_edges_fire_per_press_with_refractory():
+    cal = FlexCal()
+    cal.snap([f["strain"] for f in SEG["rest"]])
+    edges = FlexEdges()
+
+    # The squeeze segment is repeated presses -> several squeeze events, no pulls.
+    sq_events = pl_events = 0
+    for f in SEG["squeeze"]:
+        for e in edges.update(cal.cook(f["strain"])):
+            if e["type"] == "squeeze":
+                sq_events += 1
+                assert 0.0 < e["strength"] <= 1.0
+            else:
+                pl_events += 1
+    assert sq_events >= 1
+    assert pl_events == 0
+
+    # The pull segment fires pulls.
+    edges = FlexEdges()
+    pulls = sum(1 for f in SEG["pull"] for e in edges.update(cal.cook(f["strain"]))
+                if e["type"] == "pull")
+    assert pulls >= 1
+
+
+def test_flex_edges_refractory_blocks_machinegun():
+    # A held squeeze (flex pinned high) is exactly ONE event, not one per tick.
+    edges = FlexEdges()
+    fired = sum(len(edges.update(0.9)) for _ in range(100))
+    assert fired == 1
+    # Relaxing past the release threshold re-arms for the next press.
+    edges.update(0.0)
+    assert len(edges.update(0.9)) == 1
+
+
+def test_flex_edges_nullable():
+    assert FlexEdges().update(None) == []

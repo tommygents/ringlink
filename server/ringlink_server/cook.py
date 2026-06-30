@@ -156,6 +156,41 @@ class LeanCal:
         return {"pitch": comp(self.pitch), "roll": comp(self.roll)}
 
 
+class FlexEdges:
+    """Discrete `squeeze` / `pull` events from the continuous `flex`.
+
+    Fires once when flex crosses the onset, then **refractory**: it won't re-fire
+    until flex relaxes back past a lower `release` threshold (hysteresis), so a single
+    held press is one event and sensor jitter near the onset can't machine-gun. This
+    is the server-side edge guarantee the games used to hand-roll (flappy's reader).
+    `squeeze` and `pull` are tracked independently (opposite flex signs).
+    """
+
+    def __init__(self, onset: float = 0.5, release: float = 0.2):
+        self.onset = onset
+        self.release = release
+        self._sq_armed = True
+        self._pl_armed = True
+
+    def update(self, flex) -> list:
+        if flex is None:
+            return []  # nullable: no flex this tick, no edge
+        events = []
+        # squeeze (positive flex)
+        if self._sq_armed and flex >= self.onset:
+            events.append({"type": "squeeze", "strength": clamp(flex, 0.0, 1.0)})
+            self._sq_armed = False
+        elif not self._sq_armed and flex <= self.release:
+            self._sq_armed = True
+        # pull (negative flex)
+        if self._pl_armed and flex <= -self.onset:
+            events.append({"type": "pull", "strength": clamp(-flex, 0.0, 1.0)})
+            self._pl_armed = False
+        elif not self._pl_armed and flex >= -self.release:
+            self._pl_armed = True
+        return events
+
+
 __all__ = [
     "PULL_FLOOR",
     "PUSH_CEIL",
@@ -168,4 +203,5 @@ __all__ = [
     "gravity_axis",
     "resolve_axis",
     "LeanCal",
+    "FlexEdges",
 ]
