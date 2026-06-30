@@ -59,11 +59,13 @@ pytest -q                          # no hardware needed
 
 ```bash
 python -m ringlink_server latency                        # Phase 1 transport spike
-python -m ringlink_server serve --simulate-status        # stub on ws://127.0.0.1:28412
+python -m ringlink_server replay traces/right-pad.jsonl   # Phase 5 cooked pipeline, no pad
+python -m ringlink_server serve --stub --simulate-status  # stub on ws://127.0.0.1:28412
 python -m http.server 8000 --directory clients/browser   # then open http://localhost:8000
 ```
 
-See `docs/latency-budget.md` (Phase 1) and `docs/spike-b-browser-client.md` (Phase 2).
+`serve` (no `--stub`) runs the real cooked server against live pads. See
+`docs/latency-budget.md` (Phase 1) and `docs/spike-b-browser-client.md` (Phase 2).
 
 **HID binding is cython `hidapi`, never apmorton `hid`** — they collide on the
 `hid` import name. `pip install hidapi` ships prebuilt wheels (bundled native

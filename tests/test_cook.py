@@ -15,6 +15,8 @@ from ringlink_server.cook import (
     FlexCal,
     FlexEdges,
     LeanCal,
+    cook_stick,
+    decode_buttons,
     gravity_axis,
     pull_of,
     resolve_axis,
@@ -197,3 +199,51 @@ def test_flex_edges_refractory_blocks_machinegun():
 
 def test_flex_edges_nullable():
     assert FlexEdges().update(None) == []
+
+
+# --------------------------------------------------------------------------- #
+# buttons / stick (right-pad only; the rest of the cooked frame)  [N7]
+# --------------------------------------------------------------------------- #
+
+def test_decode_buttons_none_down_is_empty():
+    # The whole rest segment has no buttons pressed -> always [].
+    for f in SEG["rest"]:
+        assert decode_buttons(tuple(f["buttons"])) == []
+
+
+def test_decode_buttons_face_and_shoulder():
+    # Right-pad face/shoulder bits live in the first button byte (offset 3):
+    # Y=0x01 X=0x02 B=0x04 A=0x08 SR=0x10 SL=0x20 R=0x40 ZR=0x80.
+    assert decode_buttons((0x08, 0, 0)) == ["A"]
+    assert decode_buttons((0x04, 0, 0)) == ["B"]
+    assert decode_buttons((0xC0, 0, 0)) == ["R", "ZR"]
+
+
+def test_decode_buttons_shared_byte():
+    # Plus / R-stick / Home live in the shared byte (offset 4): Plus=0x02,
+    # RStick=0x04, Home=0x10. (Minus/Capture/L-stick are left-pad, omitted.)
+    assert decode_buttons((0, 0x02, 0)) == ["plus"]
+    assert decode_buttons((0, 0x10, 0)) == ["home"]
+
+
+def test_decode_buttons_nullable():
+    assert decode_buttons(None) == []
+
+
+def test_cook_stick_rest_is_centered_within_deadzone():
+    # The captured rest stick (~[2210, 1974]) sits inside the deadzone -> [0, 0].
+    for f in SEG["rest"]:
+        x, y = cook_stick(tuple(f["stick"]))
+        assert x == 0.0 and y == 0.0
+
+
+def test_cook_stick_extremes_saturate_signed():
+    # Raw 12-bit, center ~2048: full-left (0) -> -1 on X, full-right (4095) -> +1.
+    x_lo, _ = cook_stick((0, 2048))
+    x_hi, _ = cook_stick((4095, 2048))
+    assert x_lo <= -0.99
+    assert x_hi >= 0.99
+
+
+def test_cook_stick_nullable():
+    assert cook_stick(None) == [0.0, 0.0]

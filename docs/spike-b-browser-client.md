@@ -38,7 +38,7 @@ RINGLINK_PYTHON=/path/to/venv/python node clients/browser/contract-check.js
 Live browser demo (two terminals):
 
 ```bash
-python -m ringlink_server serve --simulate-status        # stub on ws://127.0.0.1:28412
+python -m ringlink_server serve --stub --simulate-status  # stub on ws://127.0.0.1:28412
 python -m http.server 8000 --directory clients/browser   # serve index.html
 # open http://localhost:8000
 ```

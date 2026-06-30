@@ -218,6 +218,63 @@ class FlexEdges:
         return events
 
 
+# Right-pad button bitfields (design [N7]: buttons are right-pad only). The raw
+# `buttons` triple is (btn_r, btn_shared, btn_left) — the three button bytes of a
+# standard 0x30 input report. Only the right-pad-relevant bits are named; left-pad
+# bits (Minus, Capture, L-stick) are omitted from the v1 vocabulary. Bit layout is
+# the documented Switch report (same source as parse_report's offsets).
+_BTN_R_BITS = [  # byte 0 (offset 3): right face + shoulder, low bit first
+    (0x01, "Y"), (0x02, "X"), (0x04, "B"), (0x08, "A"),
+    (0x10, "SR"), (0x20, "SL"), (0x40, "R"), (0x80, "ZR"),
+]
+_BTN_SHARED_BITS = [  # byte 1 (offset 4): only the right-pad-reachable shared bits
+    (0x02, "plus"), (0x04, "rstick"), (0x10, "home"),
+]
+
+
+def decode_buttons(raw_buttons) -> list:
+    """Right-pad buttons currently down, as wire names (design vocabulary, [N7]).
+
+    `raw_buttons` is the raw `(btn_r, btn_shared, btn_left)` triple from
+    `parse_report` (or `None` for a too-short report -> `[]` per the nullable
+    contract). Order is stable (face/shoulder by ascending bit, then shared) so the
+    wire output is deterministic.
+    """
+    if not raw_buttons:
+        return []
+    btn_r, btn_shared = raw_buttons[0], raw_buttons[1]
+    names = [name for mask, name in _BTN_R_BITS if btn_r & mask]
+    names += [name for mask, name in _BTN_SHARED_BITS if btn_shared & mask]
+    return names
+
+
+# Analog-stick normalization. Raw rx/ry are 12-bit (0..4095) centered near 2048; we
+# map to signed −1..1 with a small radial deadzone so the rest jitter (~[2210,1974],
+# not exactly centered) reads [0, 0]. This is an *approximate* normalization: true
+# per-stick center/range live in the Joy-Con SPI calibration block, which v1 does not
+# read — making stick calibration SPI-derived is a tracked follow-up. Games in scope
+# (flappy/ski/doom) are flex/lean/gait-driven, so the stick is a low-stakes convenience.
+STICK_CENTER = 2048.0
+STICK_HALF_RANGE = 2048.0
+STICK_DEADZONE = 0.12
+
+
+def cook_stick(raw_stick) -> list:
+    """Normalize the raw right-pad stick `(rx, ry)` to signed `[x, y]` in −1..1.
+
+    `None` (too-short report) -> `[0.0, 0.0]` (nullable contract: no stick this
+    tick reads as centered). Applies a radial deadzone so an off-center rest reads
+    as centered; values saturate at ±1 at the raw extremes.
+    """
+    if not raw_stick:
+        return [0.0, 0.0]
+    x = clamp((raw_stick[0] - STICK_CENTER) / STICK_HALF_RANGE)
+    y = clamp((raw_stick[1] - STICK_CENTER) / STICK_HALF_RANGE)
+    if (x * x + y * y) ** 0.5 < STICK_DEADZONE:
+        return [0.0, 0.0]
+    return [x, y]
+
+
 # Frames captured per calibration step. ~90 @66Hz ≈ 1.4s — long enough for a steady
 # gravity read / a full directed lean, short enough not to tire the user. Tunable; L4
 # may map a `seconds` request onto it. Trace-replay tests feed exactly this many.
@@ -370,6 +427,8 @@ __all__ = [
     "FlexCal",
     "squeeze_of",
     "pull_of",
+    "decode_buttons",
+    "cook_stick",
     "gravity_axis",
     "resolve_axis",
     "WeakGestureError",
