@@ -48,6 +48,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit a scripted pad_lost->live status transition (spike demo)",
     )
+
+    p_stream = sub.add_parser(
+        "stream",
+        help="L1+L2 raw readout from a live pad (Phase 3 verification; needs hardware)",
+    )
+    p_stream.add_argument("--pad", choices=["R", "L", "both"], default="both")
+    p_stream.add_argument(
+        "--seconds", type=float, default=0.0,
+        help="auto-stop after N seconds (0 = until Ctrl-C)",
+    )
+
+    p_record = sub.add_parser(
+        "record",
+        help="guided canonical raw-trace capture for one pad (Phase 3; needs hardware)",
+    )
+    p_record.add_argument("--pad", choices=["R", "L"], required=True)
+    p_record.add_argument(
+        "--out", default="traces", help="output directory (default ./traces)"
+    )
+    p_record.add_argument("--name", default=None, help="trace basename (default right-pad/left-pad)")
     return parser
 
 
@@ -84,6 +104,56 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_stream(args: argparse.Namespace) -> int:
+    import time
+
+    from .lifecycle import AlreadyRunning, RingHub, acquire_singleton
+
+    sides = ("R", "L") if args.pad == "both" else (args.pad,)
+    try:
+        sing = acquire_singleton()
+    except AlreadyRunning as exc:
+        print(f"! {exc}", file=sys.stderr)
+        return 1
+
+    def on_status(s: dict) -> None:
+        print(f"  [status] {s}")
+
+    hub = RingHub(sides=sides, on_status=on_status)
+    try:
+        up = hub.start()
+        live = [s for s, ok in up.items() if ok]
+        if not live:
+            print("! No requested pad came up. Press a button to wake the Joy-Con(s).",
+                  file=sys.stderr)
+            return 2
+        print(f"Streaming raw frames from {live} (Ctrl-C to stop).\n")
+        deadline = time.monotonic() + args.seconds if args.seconds > 0 else None
+        while deadline is None or time.monotonic() < deadline:
+            try:
+                side, frame, t = hub.frames.get(timeout=0.5)
+            except Exception:
+                continue
+            s = frame["strain"]
+            s_str = f"0x{s:02x}" if s is not None else " n/a"
+            print(f"{side} t={t:7.2f} strain={s_str} accel={frame['accel']} gyro={frame['gyro']}")
+    except KeyboardInterrupt:
+        print("\nstopping.")
+    finally:
+        hub.stop()
+        sing.release()
+    return 0
+
+
+def _cmd_record(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .record import record_trace
+
+    record_trace(args.pad, Path(args.out), name=args.name)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -91,6 +161,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_latency(args)
     if args.command == "serve":
         return _cmd_serve(args)
+    if args.command == "stream":
+        return _cmd_stream(args)
+    if args.command == "record":
+        return _cmd_record(args)
     # No subcommand — print help so a bare invocation is self-documenting.
     parser.print_help()
     return 0
