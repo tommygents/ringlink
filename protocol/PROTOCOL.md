@@ -225,6 +225,18 @@ the *secondary* axis (≈0 at rest, grows with one specific lean) gives robust, 
 axes (12×/3× margins on the same trace). A future implementer must **not** rebuild the
 bare maximum-deflection rule.
 
+**Known v1 limitation — roll can collide with pitch.** Roll resolution excludes
+only the gravity axis, **not** the axis already resolved for pitch. If the
+`lean-right` capture contains more forward/back deflection than rightward
+deflection (the user leans forward while returning, or misreads the prompt),
+roll resolves onto the **same** (axis, sign-independent) axis as pitch — the
+symptom is `lean.pitch` and `lean.roll` tracking the same motion until
+recalibrated. If this bites in practice, the fix is a **protocol change**: also
+exclude the pitch-resolved axis during the `lean-right` step (leaving exactly
+one candidate). That is a normative-semantics change — bump this document's
+revision and update server + clients together; do not patch it quietly in the
+server.
+
 The resolved (axis-index, sign) pairs are what `lean.pitch` / `lean.roll` are
 computed against thereafter. The leg pad needs only the still rest-gravity capture
 (`step: "rest"` alone — no directed step, since `LegTracker` is orientation-agnostic

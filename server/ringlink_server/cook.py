@@ -168,6 +168,11 @@ class LeanCal:
                                   min_deflection=min_deflection)
 
     def resolve_roll(self, samples: list, min_deflection: float = 0.0) -> None:
+        # Deliberately excludes ONLY the gravity axis (normative): a lean-right
+        # capture dominated by forward/back motion can therefore resolve roll onto
+        # the SAME axis as pitch (symptom: pitch and roll track the same motion).
+        # The fix is a protocol change — see PROTOCOL.md §Axis resolution, "Known
+        # v1 limitation" — not a quiet exclusion added here.
         self.roll = resolve_axis(self.rest_accel, samples,
                                  exclude=gravity_axis(self.rest_accel),
                                  min_deflection=min_deflection)
