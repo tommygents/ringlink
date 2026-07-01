@@ -303,7 +303,9 @@ def parse_report(buf: bytes) -> dict | None:
     L3 must not assume their presence. ``buttons`` / ``stick`` are **right-pad
     only** ([N7]); the left pad contributes IMU only.
     """
-    if not buf or buf[0] not in (0x30, 0x31, 0x32):
+    if len(buf) < 12 or buf[0] not in (0x30, 0x31, 0x32):
+        # Too short even for buttons+stick (bytes 3..11) -> malformed, not partial.
+        # Without this, a truncated read would IndexError and kill the reader thread.
         return None
     btn_r, btn_share, btn_l = buf[3], buf[4], buf[5]
     rx = buf[9] | ((buf[10] & 0x0F) << 8)

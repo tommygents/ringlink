@@ -67,8 +67,8 @@ export class RingLinkClient {
     }
   }
 
-  calibrate(pad = "R", pose = "rest") {
-    this.ws?.send(JSON.stringify({ type: "calibrate", pad, pose, seconds: 3 }));
+  calibrate(pad = "R") {
+    this.ws?.send(JSON.stringify({ type: "calibrate", pad, seconds: 3 }));
   }
 
   close() { this._closed = true; this.ws?.close(); }

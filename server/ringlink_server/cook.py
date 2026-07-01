@@ -387,11 +387,10 @@ class Calibrator:
                     # Rest snaps BOTH flex rest and lean gravity — and must run before
                     # the leans, since resolution excludes the gravity axis snapped here.
                     if self._flex is not None:
-                        before = self._flex.rest
-                        self._flex.snap([f.get("strain") for f in self._buf])
-                        self.flex_snapped = self._flex.rest != before or any(
-                            f.get("strain") is not None for f in self._buf
-                        )
+                        strains = [f.get("strain") for f in self._buf]
+                        self._flex.snap(strains)
+                        # snap() is a no-op on all-None strains (rest stays default)
+                        self.flex_snapped = any(s is not None for s in strains)
                     if self._lean is not None:
                         self._lean.snap_rest(accels)
                 elif self._leg is not None:

@@ -176,11 +176,12 @@ def _cmd_serve_cooked(args: argparse.Namespace) -> int:
 
     async def main() -> None:
         loop = asyncio.get_running_loop()
-        # The WS server is the singleton listener conceptually; we keep the lock
-        # socket as a belt-and-suspenders endpoint marker. websockets binds its own
-        # listener on the same port, so a second instance's bind fails too.
+        # The WS server listens on the singleton lock socket itself (binding the
+        # same port twice would fail) — lock and listener are one socket, so a
+        # second instance's bind still fails and a probing client gets a real
+        # WS handshake.
         async with run_server(
-            hub_frame_source(hub), host=args.host, port=args.port,
+            hub_frame_source(hub), sock=sing.sock,
             rate_hz=args.rate, pads=pads,
         ) as app:
             # Publish app+loop so the already-wired on_status callback can broadcast.

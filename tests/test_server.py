@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 from pathlib import Path
 
 import pytest
@@ -254,6 +255,24 @@ def test_producer_is_not_stalled_by_a_slow_consumer():
                         await asyncio.sleep(0.01)
                 await asyncio.wait_for(wait_consumed(), timeout=3.0)
                 assert app.pipeline.seq == len(frames)
+
+    asyncio.run(scenario())
+
+
+def test_run_server_listens_on_an_injected_singleton_socket():
+    # Regression: the cooked `serve` path hands the already-bound singleton lock
+    # socket to run_server (`sock=`). Binding the same host:port a second time
+    # fails (EADDRINUSE), so lock and WS listener must be the same socket.
+    async def scenario():
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        start = asyncio.Event()
+        src = _paced_source(_right_frames()[:5], start)
+        async with run_server(src, sock=sock) as app:
+            assert app.port == sock.getsockname()[1]
+            async with connect(f"ws://127.0.0.1:{app.port}") as ws:
+                assert json.loads(await ws.recv())["type"] == "hello"
 
     asyncio.run(scenario())
 

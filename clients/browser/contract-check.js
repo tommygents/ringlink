@@ -28,7 +28,9 @@ async function waitUntil(pred, ms, label) {
   throw new Error(`timeout waiting for: ${label}`);
 }
 function spawnServer() {
-  const p = spawn(PY, ["-m", "ringlink_server", "serve", "--port", String(PORT), "--simulate-status"],
+  // --stub: Phase 5 repointed bare `serve` at the cooked server (needs hardware);
+  // this harness runs against the fake-data stub, where --simulate-status lives.
+  const p = spawn(PY, ["-m", "ringlink_server", "serve", "--stub", "--port", String(PORT), "--simulate-status"],
                   { stdio: ["ignore", "ignore", "inherit"] });
   return p;
 }

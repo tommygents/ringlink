@@ -52,8 +52,9 @@
         $("banner").textContent = lost ? "Right pad asleep — press a button to wake" : "Pad live";
       },
       onCalibrating(m) {
-        $("overlay").textContent = m.step === "done"
-          ? "" : `Calibrating ${m.pad}: ${m.step} ${m.pct}%`;
+        // step: null is completion (PROTOCOL 0.2); "done" is the Phase-2 stub's sentinel.
+        const done = m.step == null || m.step === "done";
+        $("overlay").textContent = done ? "" : `Calibrating ${m.pad}: ${m.step} ${m.pct}%`;
       },
       onError(e) { $("banner").className = "err"; $("banner").textContent = e.message; },
       onConnection(s) { if (s === "closed") $("banner").textContent = "Reconnecting…"; },

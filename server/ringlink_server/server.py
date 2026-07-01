@@ -271,12 +271,18 @@ async def run_server(
     frame_source,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
+    sock=None,
     **kwargs,
 ):
     """Async context manager: bind the WS server, start the frame pump, yield the
-    running `RingServer` (with `.port` bound). Cancels cleanly on exit."""
+    running `RingServer` (with `.port` bound). Cancels cleanly on exit.
+
+    Pass `sock` (an already-bound, listening socket — the singleton lock) to listen
+    on it instead of binding `host`/`port`; binding the same port twice fails, so
+    lock and listener must be the same socket (see `lifecycle.acquire_singleton`)."""
     app = RingServer(frame_source, **kwargs)
-    async with serve(app.handler, host, port, origins=ALLOWED_ORIGINS) as ws_server:
+    bind = {"sock": sock} if sock is not None else {"host": host, "port": port}
+    async with serve(app.handler, origins=ALLOWED_ORIGINS, **bind) as ws_server:
         app.port = server_port(ws_server)
         consume = asyncio.create_task(app._consume())
         try:

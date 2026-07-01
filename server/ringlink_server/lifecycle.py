@@ -66,17 +66,20 @@ def endpoint_path() -> Path:
 
 
 class Singleton:
-    """Holds the bound singleton socket + the discovery file; release on exit."""
+    """Holds the bound singleton socket + the discovery file; release on exit.
+
+    `sock` is exposed so the L4 WS server can listen on it directly (lock and
+    listener are the same socket — see `acquire_singleton`)."""
 
     def __init__(self, sock: socket.socket, host: str, port: int, path: Path):
-        self._sock = sock
+        self.sock = sock
         self.host = host
         self.port = port
         self.path = path
 
     def release(self) -> None:
         try:
-            self._sock.close()
+            self.sock.close()
         finally:
             try:
                 self.path.unlink()
@@ -105,12 +108,11 @@ def acquire_singleton(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> Sin
         raise AlreadyRunning(
             f"ringlink server already running on {host}:{port} ({exc})"
         ) from exc
-    # Phase 3: this socket is a pure lock — we listen() so a second bind fails, but
-    # never accept(). PHASE 5 NOTE: a client probing the port gets a successful TCP
-    # connect (the backlog accepts it) with no WS handshake, so a bare connect-probe
-    # can't distinguish "WS server up" from "lock held by stream/record". The L4 WS
-    # server must BE this accepting socket, or the client's probe must complete a
-    # real handshake before deciding not to spawn.
+    # The cooked `serve` path hands this socket to the WS server (run_server's
+    # `sock=`), so lock and listener are the same socket and a probing client gets a
+    # real WS handshake. Lock-only holders (stream/record) listen() but never
+    # accept(): their backlog still completes a bare TCP connect, so a client must
+    # finish a WS handshake — not just connect — before deciding not to spawn.
     sock.listen(1)
     path = endpoint_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -279,10 +281,23 @@ class RingHub:
             if not info:
                 up[side] = False
                 continue
-            jc = JoyCon(info["path"])
-            ok = jc.init_ringcon() if side == "R" else jc.init_imu_only()
+            # A handle that dies mid-open/init (pad dropped between enumerate and
+            # open, BT hiccup) is a pad that didn't come up — not a crash. Same
+            # OSError semantics as PadReader._reinit.
+            try:
+                jc = JoyCon(info["path"])
+            except OSError:
+                up[side] = False
+                continue
+            try:
+                ok = jc.init_ringcon() if side == "R" else jc.init_imu_only()
+            except OSError:
+                ok = False
             if not ok:
-                jc.close()
+                try:
+                    jc.close()
+                except OSError:
+                    pass
                 up[side] = False
                 continue
             reader = PadReader(side, jc, self.frames, self._t0, self.stale_timeout_s)
